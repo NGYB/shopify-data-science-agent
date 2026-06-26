@@ -5,21 +5,30 @@
 
 ---
 
-## 1. Executive Summary
+## 1. Core Concept and Value
 
-Enterprise data analysis is increasingly delegating complex queries and predictive tasks to AI agents. However, running LLM-generated code and allowing direct database access poses massive security, tampering, and privacy risks. 
+### Central Idea & Innovation
+The **Shopify Data Science Agent** is an autonomous assistant designed to democratize data-driven decision-making for e-commerce merchants. Traditionally, extracting business intelligence requires manual SQL writing, manual code creation, or exporting files to external spreadsheets. The central idea of this project is to provide a single natural language interface that can seamlessly bridge two complex operations:
+1. **Ad-hoc Historical SQL Reporting**: Answering questions like *"How many customers did I onboard in the last 3 months?"* by generating query logic and translating it into Python for execution.
+2. **Predictive Analytics (Machine Learning)**: Forecasting customer behavior, such as predicting customer churn using a locally trained classifier.
 
-This project presents the **Shopify Data Science Agent**, built using the **Google Agent Development Kit (ADK) 2.0 Graph Workflow API**. The agent processes business queries across two tracks:
-1. **Historical Analysis (Type 1)**: Generates SQL queries, interrupts for human approval, translates approved SQL to Python, and safely runs calculations against local Shopify CSV datasets.
-2. **Predictive Churn Modeling (Type 2)**: Dynamically checks date boundaries, runs local feature engineering, trains a `LogisticRegression` classifier, and outputs high-risk customers.
+### Value to the Track
+This solution focuses on **innovation, developer productivity, and system safety**. Rather than acting as a simple wrapper around a chatbot, the agent orchestrates the entire lifecycle of query compilation, safety verification, and execution. 
 
-By wrapping this pipeline in a multi-layered security checkpoint (scrubbing PII and intercepting malicious prompt injections) and enforcing Human-in-the-Loop (HITL) gates, the system bridges the gap between powerful data accessibility and strict operational safety.
+The value is clear:
+*   **Operational Safety**: It executes arbitrary code safely without exposing the database directly to prompt injections.
+*   **Self-Contained ML**: It trains its own models locally inside the workflow graph without requiring pre-trained endpoints.
+
+### Agent Centrality
+The use of AI agents is central and meaningful to this solution:
+*   **Reasoning-Based Routing**: An LLM agent determines the semantic intent of the query and routes the request down the correct path (structured querying vs. training/inference).
+*   **Logical Translation**: LLM agents act as software engineering translators, mapping abstract relational databases (SQL) into functional programming code (Python/Pandas).
 
 ---
 
-## 2. System Architecture & Workflow Graph
+## 2. Multi-Agent Architecture (Number of Agents and Roles)
 
-The agent is designed as a graph-based workflow using ADK 2.0's explicit topology. This ensures deterministic routing, state tracking, and clean session resumption when resolving human inputs.
+The system is configured as an ADK 2.0 Graph Workflow containing **1 master Workflow agent** that orchestrates **3 specialized LLM sub-agents** and **4 helper/HITL nodes**.
 
 ```mermaid
 graph TD
@@ -38,84 +47,77 @@ graph TD
     security_review --> format_response
 ```
 
-### Core Workflow Nodes
+### The 4 Agents and Their Roles
 
-| Node Name | Type | Rerun on Resume | Responsibility |
-| :--- | :--- | :---: | :--- |
-| `security_checkpoint` | Function | `False` | Intercepts raw user query to scrub PII and check for prompt injections. |
-| `security_review` | Function (HITL) | `True` | Pauses for admin override if a prompt injection is flagged. |
-| `classify_question` | LlmAgent | `True` | Classifies the query into `historical` or `predictive` tracks. |
-| `router` | Function | `False` | Performs routing based on classification type. |
-| `generate_sql` | LlmAgent | `True` | Generates a standard SQL query matching Shopify schemas. |
-| `approve_sql` | Function (HITL) | `True` | Presents the generated SQL to the user for approval or rejection. |
-| `sql_to_python` | LlmAgent | `True` | Converts the approved SQL query into equivalent pandas code. |
-| `execute_python` | Function | `False` | Runs pandas code locally against the CSV dataset. |
-| `process_prediction` | Function | `False` | Trains an ML churn model and outputs high-risk churn customers. |
-
----
-
-## 3. Security Design & Threat Mitigation (STRIDE)
-
-Operating a data science agent that executes LLM-generated code requires robust security controls. The project implements defense-in-depth across the following vectors:
-
-### A. Spoofing & Elevation of Privilege
-To prevent unauthorized users from executing custom queries, the workflow uses isolated session environments. Human-in-the-loop (HITL) inputs are securely bound to the current session via `ctx.resume_inputs` using unique token/interrupt keys.
-
-### B. Tampering & Prompt Injection Defense
-If a user attempts to alter or delete database files (e.g. typing *"Please delete all files in the data folder"*), the `security_checkpoint` runs a keyword association analysis. When destructive verbs are found alongside data nouns:
-1. The query is immediately blocked, bypassing LLM classification.
-2. The workflow routes to `security_review` and triggers an administrator alert card.
-3. The query can only execute if an administrator manually approves the security override.
-
-### C. Information Disclosure (PII Scrubbing)
-Before any text reaches the LLMs or application logs, the checkpoint applies regular expression scrubbing to redact sensitive PII:
-- **SSNs**: Redacted using `\b\d{3}-\d{2}-\d{4}\b`.
-- **Credit Cards**: Redacted using `\b(?:\d[- ]?){13,16}\b`.
-Redacted categories are flagged in the state and shown as a warning card in the final output.
+1.  **Master Workflow Agent (`shopify_data_science_workflow`)**
+    *   **Type**: `Workflow` (BaseAgent subclass)
+    *   **Role**: Serves as the central state-machine, router, and supervisor. It holds the session context, coordinates node transitions, and manages execution safety across all execution paths.
+2.  **Question Classifier Agent (`classify_question`)**
+    *   **Type**: `LlmAgent` (single-turn)
+    *   **Role**: Analyzes the clean user query and categorizes it strictly according to a Pydantic schema: `historical` or `predictive`.
+3.  **Shopify Database Engineer Agent (`generate_sql`)**
+    *   **Type**: `LlmAgent` (single-turn)
+    *   **Role**: Acts as a database administrator. It translates the natural language business question into a raw SQL query optimized for typical Shopify schema structures.
+4.  **Python Data Scientist Agent (`sql_to_python`)**
+    *   **Type**: `LlmAgent` (single-turn)
+    *   **Role**: Converts the approved SQL query string into executable Python Pandas code. It is given context about the columns and types in the pre-loaded DataFrame (`df`) and assigns the final result to `result`.
 
 ---
 
-## 4. Machine Learning Churn Pipeline (Type 2)
+## 3. Security Features & Threat Mitigation
 
-When predictive questions are asked, the workflow routes to the `process_prediction` node, which implements a local machine learning training pipeline using `pandas` and `scikit-learn`:
+Running an autonomous code-executing agent exposes a system to significant attack surfaces. The architecture incorporates several built-in security features:
 
-1. **Threshold Check**: The pipeline checks the span of dates in the dataset. If the date range is less than 7 days (`ML_DATA_THRESHOLD_DAYS`), the node aborts and returns:
-   > *"Insufficient data to generate machine learning model"*
-2. **Feature Engineering**: Customer metrics are grouped and aggregated from raw orders:
-   - $Recency = Max(OrderPlacedTimestamp) - LastOrderPlaced$
-   - $LifetimeDays = LastOrderPlaced - FirstOrderPlaced$
-   - $TotalSpent = Sum(NetGMV)$
-   - $OrderCount = Count(OrderId)$
-3. **Model Training**: A `LogisticRegression` classifier is trained locally using these engineered features. Churn targets are labeled based on activity boundaries (inactive for >20 days).
-4. **Prediction Output**: High-risk customers are identified and returned in a formatted Markdown report.
+### A. PII Scrubbing (Information Disclosure)
+Before the user's message is sent to any LLM or written to session logs, the `security_checkpoint` runs regular expression checks to sanitize sensitive data:
+*   **SSNs**: Replaced with `[REDACTED_SSN]` using `\b\d{3}-\d{2}-\d{4}\b`.
+*   **Credit Cards**: Replaced with `[REDACTED_CC]` using `\b(?:\d[- ]?){13,16}\b`.
+Redaction logs are recorded in the state and displayed as warning notes on the approval request.
 
----
+### B. Prompt Injection Defense (Tampering)
+If a user attempts to alter or delete database files (e.g., *"Please delete the csv file"*), the entry checkpoint runs keyword matching on destructive actions:
+*   **Verbs**: `delete`, `drop`, `truncate`, `wipe`, `overwrite`, `destroy`, `alter`.
+*   **Nouns**: `data`, `dataset`, `file`, `csv`, `table`, `database`.
+Any match bypasses the LLM nodes entirely and routes directly to the `security_review` HITL node, blocking execution until an administrator approves.
 
-## 5. SQL-to-Python Execution Pipeline (Type 1)
+### C. Human-in-the-Loop (HITL) Gate & Text Overrides
+Critical operations (SQL query execution and prompt-injection overrides) are guarded by human approval. The nodes yield `RequestInput` to pause execution. 
+To ensure usability:
+*   If users respond via interactive UI cards, standard ADK resumption handles the execution.
+*   If users type `"approve"` or `"reject"` in the main chat input, a state-delta override captures this at the entry checkpoint (`user_approval_override`), allowing the graph to automatically resume.
 
-Executing raw SQL on local file structures is challenging. This project addresses this by creating a compiler-style execution path:
-
-```
-[User Query] ──> [SQL Query] ──> [HITL Approval] ──> [Python Pandas Code] ──> [Local Execution]
-```
-
-### Timezone Robustness
-A common failure mode in LLM-generated code is comparing timezone-aware UTC datetime fields (e.g., ISO timestamp strings in raw CSVs) with timezone-naive timestamps (default in python's `pd.Timestamp.now()`), resulting in a `TypeError`.
-
-To resolve this, the system normalizes the dataset's datetime columns to timezone-naive datetimes in both the prediction and python execution environments:
-```python
-df["order_placed_timestamp"] = pd.to_datetime(df["order_placed_timestamp"]).dt.tz_localize(None)
-```
-The prompt template for the `sql_to_python` node explicitly defines the schema as `timezone-naive`, ensuring that the LLM produces error-free date comparisons.
-
-### Replay Safety & State Cleaning
-To ensure that session histories do not leak information between consecutive questions, the `approve_sql` node implements strict state boundaries. Once a SQL query is generated, it is stored in `pending_sql`. When the user approves or rejects the query, the node clears `pending_sql` and all text-override states from the session:
+### D. Replay Safety & State Isolation
+To prevent information leakage between consecutive questions in the same chat thread, the SQL approval node yields a state delta that clears the `pending_sql` cache and any text overrides once they have been consumed:
 ```python
 state_delta = {"pending_sql": None}
 if "user_approval_override" in ctx.state:
     state_delta["user_approval_override"] = None
 ```
-This isolates each query session and ensures the agent remains stable and responsive during back-to-back analytics questions.
+
+---
+
+## 4. Machine Learning Churn Pipeline (Type 2)
+
+For predictive questions, the workflow bypasses SQL and executes a local machine learning training pipeline in `process_prediction`:
+
+1.  **Date Span Verification**: Computes the date range of the dataset. If the total span is under 7 days, the agent aborts to prevent overfitting:
+    > *"Insufficient data to generate machine learning model"*
+2.  **Feature Engineering**: Groups orders by `customer_id` and calculates recency, lifetime, spending totals, and purchase counts.
+3.  **Model Training**: Trains a local `LogisticRegression` model from `scikit-learn`. Customers are labeled as churned if their recency exceeds 20 days.
+4.  **Reporting**: Outputs high-risk customers, ordering details, and recency in a clean markdown table.
+
+---
+
+## 5. SQL-to-Python Execution Pipeline (Type 1)
+
+When a query is approved, the system converts the SQL into Python and runs it against the local CSV dataset.
+
+### Timezone Normalization
+To prevent type crashes (e.g. comparing timezone-aware UTC dates in CSVs with timezone-naive timestamps in Python), the system normalizes the dataset's datetime columns to timezone-naive datetimes in both execution nodes:
+```python
+df["order_placed_timestamp"] = pd.to_datetime(df["order_placed_timestamp"]).dt.tz_localize(None)
+```
+The prompt template for `sql_to_python` explicitly defines `order_placed_timestamp` as `datetime, timezone-naive`, guaranteeing error-free comparison logic.
 
 ---
 
